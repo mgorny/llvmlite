@@ -4,21 +4,9 @@
 
 set -x
 
-if [[ $(uname) == Darwin ]]; then
-  ${SYS_PREFIX}/bin/conda create -y -p ${SRC_DIR}/bootstrap clangxx_osx-64
-  export PATH=${SRC_DIR}/bootstrap/bin:${PATH}
-  CONDA_PREFIX=${SRC_DIR}/bootstrap \
-    . ${SRC_DIR}/bootstrap/etc/conda/activate.d/*
-  export CONDA_BUILD_SYSROOT=${CONDA_BUILD_SYSROOT:-/opt/MacOSX${MACOSX_DEPLOYMENT_TARGET}.sdk}
-  export CXXFLAGS=${CFLAGS}" -mmacosx-version-min=${MACOSX_DEPLOYMENT_TARGET}"
-  export CFLAGS=${CFLAGS}" -mmacosx-version-min=${MACOSX_DEPLOYMENT_TARGET}"
-  SYSROOT_DIR=${CONDA_BUILD_SYSROOT}
-  CFLAG_SYSROOT="--sysroot ${SYSROOT_DIR}"
-fi
+# This is the clang compiler prefix
+DARWIN_TARGET=x86_64-apple-darwin13.4.0
 
-if [[ ${MACOSX_DEPLOYMENT_TARGET} == 10.9 ]]; then
-  DARWIN_TARGET=x86_64-apple-darwin13.4.0
-fi
 
 declare -a _cmake_config
 _cmake_config+=(-DCMAKE_INSTALL_PREFIX:PATH=${PREFIX})
@@ -27,6 +15,8 @@ _cmake_config+=(-DCMAKE_BUILD_TYPE:STRING=Release)
 # _cmake_config+=(-DBUILD_SHARED_LIBS:BOOL=ON)
 _cmake_config+=(-DLLVM_ENABLE_ASSERTIONS:BOOL=ON)
 _cmake_config+=(-DLINK_POLLY_INTO_TOOLS:BOOL=ON)
+# Don't really require libxml2. Turn it off explicitly to avoid accidentally linking to system libs
+_cmake_config+=(-DLLVM_ENABLE_LIBXML2:BOOL=OFF)
 # Urgh, llvm *really* wants to link to ncurses / terminfo and we *really* do not want it to.
 _cmake_config+=(-DHAVE_TERMINFO_CURSES=OFF)
 # Sometimes these are reported as unused. Whatever.
@@ -39,11 +29,11 @@ _cmake_config+=(-DCLANG_ENABLE_LIBXML=OFF)
 _cmake_config+=(-DLIBOMP_INSTALL_ALIASES=OFF)
 _cmake_config+=(-DLLVM_ENABLE_RTTI=OFF)
 _cmake_config+=(-DLLVM_TARGETS_TO_BUILD=host)
+_cmake_config+=(-DLLVM_INCLUDE_UTILS=ON) # for llvm-lit
 # TODO :: It would be nice if we had a cross-ecosystem 'BUILD_TIME_LIMITED' env var we could use to
 #         disable these unnecessary but useful things.
 if [[ ${CONDA_FORGE} == yes ]]; then
   _cmake_config+=(-DLLVM_INCLUDE_TESTS=OFF)
-  _cmake_config+=(-DLLVM_INCLUDE_UTILS=OFF)
   _cmake_config+=(-DLLVM_INCLUDE_DOCS=OFF)
   _cmake_config+=(-DLLVM_INCLUDE_EXAMPLES=OFF)
 fi
@@ -61,7 +51,8 @@ if [[ $(uname) == Darwin ]]; then
   # this causes link failures building the santizers since they respect DARWIN_osx_ARCHS. We may as well
   # save some compilation time by setting this for all of our llvm builds.
   _cmake_config+=(-DDARWIN_osx_ARCHS=x86_64)
-#elif [[ $(uname) == Linux ]]; then
+elif [[ $(uname) == Linux ]]; then
+  _cmake_config+=(-DLLVM_USE_INTEL_JITEVENTS=ON)
 #  _cmake_config+=(-DLLVM_BINUTILS_INCDIR=${PREFIX}/lib/gcc/${cpu_arch}-${vendor}-linux-gnu/${compiler_ver}/plugin/include)
 fi
 
@@ -78,5 +69,19 @@ cmake -G'Unix Makefiles'     \
       "${_cmake_config[@]}"  \
       ..
 
-make -j${CPU_COUNT} VERBOSE=1
-make install
+ARCH=`uname -m`
+if [ $ARCH == 'armv7l' ]; then # RPi need thread count throttling
+    make -j2 VERBOSE=1
+else
+    make -j${CPU_COUNT} VERBOSE=1
+fi
+
+# From: https://github.com/conda-forge/llvmdev-feedstock/pull/53
+make install || exit $?
+
+# SVML tests on x86_64 arch only
+if [[ $ARCH == 'x86_64' ]]; then
+    bin/opt -S -vector-library=SVML -mcpu=haswell -O3 $RECIPE_DIR/numba-3016.ll | bin/FileCheck $RECIPE_DIR/numba-3016.ll || exit $?
+fi
+cd ../test
+../build/bin/llvm-lit -vv Transforms ExecutionEngine Analysis CodeGen/X86

@@ -19,6 +19,7 @@ from llvmlite import binding as llvm
 
 int1 = ir.IntType(1)
 int8 = ir.IntType(8)
+int16 = ir.IntType(16)
 int32 = ir.IntType(32)
 int64 = ir.IntType(64)
 flt = ir.FloatType()
@@ -45,7 +46,7 @@ class TestBase(TestCase):
             return c
 
         pattern = ''.join(map(escape, pattern))
-        regex = re.sub(r'\s+', r'\s*', pattern)
+        regex = re.sub(r'\s+', r'\\s*', pattern)
         self.assertRegexpMatches(text, regex)
 
     def assert_ir_line(self, line, mod):
@@ -1164,6 +1165,170 @@ class TestBuildInstructions(TestBase):
                 call void @"llvm.assume"(i1 %"c")
             """)
 
+    def test_bitreverse(self):
+        block = self.block(name='my_block')
+        builder = ir.IRBuilder(block)
+        a = ir.Constant(int64, 5)
+        c = builder.bitreverse(a, name='c')
+        builder.ret(c)
+        self.check_block(block, """\
+            my_block:
+                %"c" = call i64 @"llvm.bitreverse.i64"(i64 5)
+                ret i64 %"c"
+            """)
+
+    def test_bitreverse_wrongtype(self):
+        block = self.block(name='my_block')
+        builder = ir.IRBuilder(block)
+        a = ir.Constant(flt, 5)
+
+        with self.assertRaises(TypeError) as raises:
+            builder.bitreverse(a, name='c')
+        self.assertIn(
+            "expected an integer type, got float",
+            str(raises.exception))
+
+    def test_fence(self):
+        block = self.block(name='my_block')
+        builder = ir.IRBuilder(block)
+        with self.assertRaises(ValueError) as raises:
+            builder.fence("monotonic", None)
+        self.assertIn(
+            "Invalid fence ordering \"monotonic\"!",
+            str(raises.exception))
+        with self.assertRaises(ValueError) as raises:
+            builder.fence(None, "monotonic")
+        self.assertIn(
+            "Invalid fence ordering \"None\"!",
+            str(raises.exception))
+        builder.fence("acquire", None)
+        builder.fence("release", "singlethread")
+        builder.fence("acq_rel", "singlethread")
+        builder.fence("seq_cst")
+        builder.ret_void()
+        self.check_block(block, """\
+            my_block:
+                fence acquire
+                fence syncscope("singlethread") release
+                fence syncscope("singlethread") acq_rel
+                fence seq_cst
+                ret void
+            """)
+
+    def test_bswap(self):
+        block = self.block(name='my_block')
+        builder = ir.IRBuilder(block)
+        a = ir.Constant(int32, 5)
+        c = builder.bswap(a, name='c')
+        builder.ret(c)
+        self.check_block(block, """\
+            my_block:
+                %"c" = call i32 @"llvm.bswap.i32"(i32 5)
+                ret i32 %"c"
+            """)
+
+    def test_ctpop(self):
+        block = self.block(name='my_block')
+        builder = ir.IRBuilder(block)
+        a = ir.Constant(int16, 5)
+        c = builder.ctpop(a, name='c')
+        builder.ret(c)
+        self.check_block(block, """\
+            my_block:
+                %"c" = call i16 @"llvm.ctpop.i16"(i16 5)
+                ret i16 %"c"
+            """)
+
+    def test_ctlz(self):
+        block = self.block(name='my_block')
+        builder = ir.IRBuilder(block)
+        a = ir.Constant(int16, 5)
+        b = ir.Constant(int1, 1)
+        c = builder.ctlz(a, b, name='c')
+        builder.ret(c)
+        self.check_block(block, """\
+            my_block:
+                %"c" = call i16 @"llvm.ctlz.i16"(i16 5, i1 1)
+                ret i16 %"c"
+            """)
+
+    def test_cttz(self):
+        block = self.block(name='my_block')
+        builder = ir.IRBuilder(block)
+        a = ir.Constant(int64, 5)
+        b = ir.Constant(int1, 1)
+        c = builder.cttz(a, b, name='c')
+        builder.ret(c)
+        self.check_block(block, """\
+            my_block:
+                %"c" = call i64 @"llvm.cttz.i64"(i64 5, i1 1)
+                ret i64 %"c"
+            """)
+
+    def test_cttz_wrongflag(self):
+        block = self.block(name='my_block')
+        builder = ir.IRBuilder(block)
+        a = ir.Constant(int64, 5)
+        b = ir.Constant(int32, 3)
+
+        with self.assertRaises(TypeError) as raises:
+            builder.cttz(a, b, name='c')
+        self.assertIn(
+            "expected an i1 type, got i32",
+            str(raises.exception))
+
+    def test_cttz_wrongtype(self):
+        block = self.block(name='my_block')
+        builder = ir.IRBuilder(block)
+        a = ir.Constant(flt, 5)
+        b = ir.Constant(int1, 1)
+
+        with self.assertRaises(TypeError) as raises:
+            builder.cttz(a, b, name='c')
+        self.assertIn(
+            "expected an integer type, got float",
+            str(raises.exception))
+
+    def test_fma(self):
+        block = self.block(name='my_block')
+        builder = ir.IRBuilder(block)
+        a = ir.Constant(flt, 5)
+        b = ir.Constant(flt, 1)
+        c = ir.Constant(flt, 2)
+        fma = builder.fma(a, b, c, name='fma')
+        builder.ret(fma)
+        self.check_block(block, """\
+            my_block:
+                %"fma" = call float @"llvm.fma.f32"(float 0x4014000000000000, float 0x3ff0000000000000, float 0x4000000000000000)
+                ret float %"fma"
+            """)
+
+    def test_fma_wrongtype(self):
+        block = self.block(name='my_block')
+        builder = ir.IRBuilder(block)
+        a = ir.Constant(int32, 5)
+        b = ir.Constant(int32, 1)
+        c = ir.Constant(int32, 2)
+
+        with self.assertRaises(TypeError) as raises:
+            builder.fma(a, b, c, name='fma')
+        self.assertIn(
+            "expected an floating point type, got i32",
+            str(raises.exception))
+
+    def test_fma_mixedtypes(self):
+        block = self.block(name='my_block')
+        builder = ir.IRBuilder(block)
+        a = ir.Constant(flt, 5)
+        b = ir.Constant(dbl, 1)
+        c = ir.Constant(flt, 2)
+
+        with self.assertRaises(TypeError) as raises:
+            builder.fma(a, b, c, name='fma')
+        self.assertIn(
+            "expected types to be the same, got float, double, float",
+            str(raises.exception))
+
 
 class TestBuilderMisc(TestBase):
     """
@@ -1742,6 +1907,17 @@ class TestConstant(TestBase):
         self.assertEqual(str(c),
             'getelementptr ({float, i1}, {float, i1}* @"myconstant", i32 0, i32 1)')
         self.assertEqual(c.type, ir.PointerType(int1))
+
+        const = ir.Constant(tp, None)
+        with self.assertRaises(TypeError):
+            c_wrong = const.gep([ir.Constant(int32, 0)])
+
+        const_ptr = ir.Constant(tp.as_pointer(), None)
+        c2  = const_ptr.gep([ir.Constant(int32, 0)])
+        self.assertEqual(str(c2),
+            'getelementptr ({float, i1}, {float, i1}* null, i32 0)')
+        self.assertEqual(c.type, ir.PointerType(int1))
+
 
     def test_gep_addrspace_globalvar(self):
         m = self.module()
